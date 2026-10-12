@@ -1,26 +1,107 @@
 
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="UTF-8">
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1">
+
+  <title>Church Display</title>
+
   <style>
     html, body {
       margin: 0;
+      padding: 0;
       width: 100%;
       height: 100%;
       background: black;
       overflow: hidden;
     }
-    body {
-      display: flex;
-      align-items: center;
-      justify-content: center;
+
+    #picture {
+      width: 100vw;
+      height: 100vh;
+      object-fit: contain;
+      display: none;
+      pointer-events: none;
+    }
+
+    #message {
       color: white;
-      font: 32px Arial, sans-serif;
+      font: 20px Arial, sans-serif;
+      text-align: center;
+      padding-top: 40vh;
     }
   </style>
 </head>
+
 <body>
-  Church Display Ready
+  <img id="picture" alt="Church Display">
+  <div id="message">Loading picture...</div>
+
+  <script>
+    const SCRIPT_URL =
+      "https://script.google.com/macros/s/AKfycbwFtmCl4_uX0ApWMYJhw08-5-A5i3pEC7ozST38ZXofY4be7-HSdTdB10syoLH1Pez2/exec";
+
+    const params = new URLSearchParams(location.search);
+    const mode = params.get("view") === "event"
+      ? "event"
+      : "daily";
+
+    const picture = document.getElementById("picture");
+    const message = document.getElementById("message");
+
+    window.churchImageCallback = function(result) {
+      if (!result.image) {
+        if (!picture.src) {
+          message.textContent =
+            result.error || "Picture not found";
+        }
+        return;
+      }
+
+      const nextImage = new Image();
+
+      nextImage.onload = function() {
+        picture.src = nextImage.src;
+        picture.style.display = "block";
+        message.style.display = "none";
+      };
+
+      nextImage.onerror = function() {
+        if (!picture.src) {
+          message.textContent = "Unable to load picture";
+        }
+      };
+
+      nextImage.src = result.image;
+    };
+
+    function updatePicture() {
+      const script = document.createElement("script");
+
+      script.src = SCRIPT_URL
+        + "?format=js&view=" + mode
+        + "&t=" + Date.now();
+
+      script.onerror = function() {
+        if (!picture.src) {
+          message.textContent = "Connection error";
+        }
+        script.remove();
+      };
+
+      script.onload = function() {
+        script.remove();
+      };
+
+      document.body.appendChild(script);
+    }
+
+    updatePicture();
+
+    // Check for a new picture every 30 minutes
+    setInterval(updatePicture, 30 * 60 * 1000);
+  </script>
 </body>
 </html>
