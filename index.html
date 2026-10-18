@@ -16,6 +16,8 @@
       height: 100%;
       background: black;
       overflow: hidden;
+      touch-action: none;
+      overscroll-behavior: none;
     }
 
     #picture {
@@ -24,6 +26,9 @@
       object-fit: contain;
       display: none;
       pointer-events: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-user-drag: none;
     }
 
     #message {
@@ -41,9 +46,12 @@
 
   <script>
     const SCRIPT_URL =
-      "https://script.google.com/macros/s/AKfycbyhI8-jfQ0BYCm7nUpu3jk_8c7dXRmBnguONBsUNr7fHsM8ab0ephpN1juTr8rAph3n/exec";
+      "https://script.google.com/macros/s/AKfycbxO5qX5Q1KdtUAfUiorLR-L3UHnp8MdMGjOZ8X-dSLpHCnN3zxoKtyGek6kFnrBfYpb/exec;
+
+    const TIMEZONE = "America/Toronto";
 
     const params = new URLSearchParams(location.search);
+
     const mode = params.get("view") === "event"
       ? "event"
       : "daily";
@@ -51,12 +59,23 @@
     const picture = document.getElementById("picture");
     const message = document.getElementById("message");
 
-    window.churchImageCallback = function(result) {
-      if (!result.image) {
-        if (!picture.src) {
+    let currentImageKey = "";
+    let requestNumber = 0;
+    let lastDailyTransition = "";
+
+    // Display an image only after it has loaded.
+    function displayImage(result) {
+      if (!result || !result.image) {
+        if (!currentImageKey) {
           message.textContent =
-            result.error || "Picture not found";
+            (result && result.error) || "Picture not found";
         }
+        return;
+      }
+
+      const imageKey = result.imageKey || result.image;
+
+      if (imageKey === currentImageKey) {
         return;
       }
 
@@ -66,42 +85,145 @@
         picture.src = nextImage.src;
         picture.style.display = "block";
         message.style.display = "none";
+        currentImageKey = imageKey;
       };
 
       nextImage.onerror = function() {
-        if (!picture.src) {
+        if (!currentImageKey) {
           message.textContent = "Unable to load picture";
         }
       };
 
       nextImage.src = result.image;
-    };
+    }
 
+    // Request the latest image from Apps Script.
     function updatePicture() {
+      const requestId = ++requestNumber;
+      const callbackName = "churchCallback_" + requestId;
+
       const script = document.createElement("script");
 
+      let finished = false;
+
+      function cleanup() {
+        if (finished) return;
+        finished = true;
+
+        clearTimeout(timeoutId);
+        script.remove();
+        delete window[callbackName];
+      }
+
+      window[callbackName] = function(result) {
+        if (requestId === requestNumber) {
+          displayImage(result);
+        }
+        cleanup();
+      };
+
       script.src = SCRIPT_URL
-        + "?format=js&view=" + mode
+        + "?format=js"
+        + "&view=" + encodeURIComponent(mode)
+        + "&callback=" + callbackName
         + "&t=" + Date.now();
 
       script.onerror = function() {
-        if (!picture.src) {
+        if (!currentImageKey) {
           message.textContent = "Connection error";
         }
-        script.remove();
+        cleanup();
       };
 
-      script.onload = function() {
-        script.remove();
-      };
+      const timeoutId = setTimeout(function() {
+        if (!currentImageKey) {
+          message.textContent = "Connection timeout";
+        }
+        cleanup();
+      }, 60000);
 
       document.body.appendChild(script);
     }
 
+    // Read Toronto's current local date and time.
+    function getTorontoTime() {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: TIMEZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23"
+      }).formatToParts(new Date());
+
+      const get = type =>
+        parts.find(p => p.type === type).value;
+
+      return {
+        date: get("year") + "-" +
+              get("month") + "-" +
+              get("day"),
+        hour: Number(get("hour")),
+        minute: Number(get("minute")),
+        second: Number(get("second"))
+      };
+    }
+
+    // Detect the daily change at 7 PM.
+    function checkDailyTransition() {
+      if (mode !== "daily") return;
+
+      const now = getTorontoTime();
+
+      if (now.hour === 19 && now.minute === 0) {
+        if (lastDailyTransition !== now.date) {
+          lastDailyTransition = now.date;
+          updatePicture();
+        }
+      }
+    }
+
+    // Load the first image.
     updatePicture();
 
-    // Check for a new picture every 30 minutes
-    setInterval(updatePicture, 30 * 60 * 1000);
+    // Backup refresh every 10 minutes.
+    setInterval(updatePicture, 10 * 60 * 1000);
+
+    // Check the clock every second.
+    // Only one transition request per day.
+    setInterval(checkDailyTransition, 1000);
+
+    // Refresh if the browser wakes up.
+    document.addEventListener("visibilitychange", function() {
+      if (!document.hidden) {
+        updatePicture();
+        checkDailyTransition();
+      }
+    });
+
+    // Refresh when the browser regains focus.
+    window.addEventListener("focus", function() {
+      updatePicture();
+      checkDailyTransition();
+    });
+
+    // Prevent the image's context menu.
+    document.addEventListener("contextmenu", function(e) {
+      e.preventDefault();
+    });
+
+    // Prevent common browser zoom shortcuts.
+    document.addEventListener("keydown", function(e) {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        ["+", "-", "=", "0"].includes(e.key)
+      ) {
+        e.preventDefault();
+      }
+    });
+
   </script>
 </body>
 </html>
