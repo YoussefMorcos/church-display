@@ -1,10 +1,9 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport"
-        content="width=device-width, initial-scale=1">
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 
   <title>Church Display</title>
 
@@ -46,7 +45,7 @@
 
   <script>
     const SCRIPT_URL =
-      "https://script.google.com/macros/s/AKfycbxO5qX5Q1KdtUAfUiorLR-L3UHnp8MdMGjOZ8X-dSLpHCnN3zxoKtyGek6kFnrBfYpb/exec";
+      "https://script.google.com/macros/s/AKfycbzS0SQV9nMn75wgZI2Y1RaSMpEAWGuwGJfj5aZtf5M8N8ZZSobJ15V8wOcLleQo1-QI/exec";
 
     const TIMEZONE = "America/Toronto";
 
@@ -63,8 +62,14 @@
     let requestNumber = 0;
     let lastDailyTransition = "";
 
-    // Display an image only after it has loaded.
-    function displayImage(result) {
+    // Display a new image only after it has loaded.
+    function displayImage(result, requestId) {
+      // The image has not changed.
+      if (result && result.unchanged === true) {
+        return;
+      }
+
+      // Missing image or server error.
       if (!result || !result.image) {
         if (!currentImageKey) {
           message.textContent =
@@ -79,9 +84,15 @@
         return;
       }
 
+      // Preload the new image to prevent flickering.
       const nextImage = new Image();
 
       nextImage.onload = function() {
+        // Ignore an outdated request.
+        if (requestId !== requestNumber) {
+          return;
+        }
+
         picture.src = nextImage.src;
         picture.style.display = "block";
         message.style.display = "none";
@@ -89,7 +100,7 @@
       };
 
       nextImage.onerror = function() {
-        if (!currentImageKey) {
+        if (!currentImageKey && requestId === requestNumber) {
           message.textContent = "Unable to load picture";
         }
       };
@@ -97,14 +108,14 @@
       nextImage.src = result.image;
     }
 
-    // Request the latest image from Apps Script.
+    // Request the latest image from Google Apps Script.
     function updatePicture() {
       const requestId = ++requestNumber;
       const callbackName = "churchCallback_" + requestId;
 
       const script = document.createElement("script");
-
       let finished = false;
+      let timeoutId;
 
       function cleanup() {
         if (finished) return;
@@ -112,31 +123,39 @@
 
         clearTimeout(timeoutId);
         script.remove();
-        delete window[callbackName];
+
+        try {
+          delete window[callbackName];
+        } catch (e) {
+          window[callbackName] = undefined;
+        }
       }
 
       window[callbackName] = function(result) {
         if (requestId === requestNumber) {
-          displayImage(result);
+          displayImage(result, requestId);
         }
         cleanup();
       };
 
+      // Send the current image key so Apps Script can
+      // avoid sending an unchanged image again.
       script.src = SCRIPT_URL
         + "?format=js"
         + "&view=" + encodeURIComponent(mode)
-        + "&callback=" + callbackName
+        + "&callback=" + encodeURIComponent(callbackName)
+        + "&currentKey=" + encodeURIComponent(currentImageKey)
         + "&t=" + Date.now();
 
       script.onerror = function() {
-        if (!currentImageKey) {
+        if (!currentImageKey && requestId === requestNumber) {
           message.textContent = "Connection error";
         }
         cleanup();
       };
 
-      const timeoutId = setTimeout(function() {
-        if (!currentImageKey) {
+      timeoutId = setTimeout(function() {
+        if (!currentImageKey && requestId === requestNumber) {
           message.textContent = "Connection timeout";
         }
         cleanup();
@@ -145,7 +164,7 @@
       document.body.appendChild(script);
     }
 
-    // Read Toronto's current local date and time.
+    // Read the current Toronto date and time.
     function getTorontoTime() {
       const parts = new Intl.DateTimeFormat("en-CA", {
         timeZone: TIMEZONE,
@@ -171,7 +190,7 @@
       };
     }
 
-    // Detect the daily change at 7 PM.
+    // Detect the daily saint change at 7 PM.
     function checkDailyTransition() {
       if (mode !== "daily") return;
 
@@ -188,14 +207,13 @@
     // Load the first image.
     updatePicture();
 
-    // Backup refresh every 10 minutes.
+    // Check for image changes every 10 minutes.
     setInterval(updatePicture, 10 * 60 * 1000);
 
     // Check the clock every second.
-    // Only one transition request per day.
     setInterval(checkDailyTransition, 1000);
 
-    // Refresh if the browser wakes up.
+    // Refresh when the browser wakes up.
     document.addEventListener("visibilitychange", function() {
       if (!document.hidden) {
         updatePicture();
@@ -209,7 +227,7 @@
       checkDailyTransition();
     });
 
-    // Prevent the image's context menu.
+    // Prevent the image context menu.
     document.addEventListener("contextmenu", function(e) {
       e.preventDefault();
     });
@@ -223,7 +241,6 @@
         e.preventDefault();
       }
     });
-
   </script>
 </body>
 </html>
