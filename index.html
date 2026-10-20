@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -49,6 +50,10 @@
 
     const TIMEZONE = "America/Toronto";
 
+    const REFRESH_INTERVAL = 10 * 60 * 1000;
+    const REQUEST_TIMEOUT = 60 * 1000;
+    const WAKE_COOLDOWN = 60 * 1000;
+
     const params = new URLSearchParams(location.search);
 
     const mode = params.get("view") === "event"
@@ -59,17 +64,23 @@
     const message = document.getElementById("message");
 
     let currentImageKey = "";
+
     let requestNumber = 0;
+    let requestInProgress = false;
+    let pendingTransition = false;
+
+    let lastRequestTime = 0;
     let lastDailyTransition = "";
 
-    // Display a new image only after it has loaded.
+    // ======================================
+    // DISPLAY IMAGE WITHOUT FLICKERING
+    // ======================================
+
     function displayImage(result, requestId) {
-      // The image has not changed.
       if (result && result.unchanged === true) {
         return;
       }
 
-      // Missing image or server error.
       if (!result || !result.image) {
         if (!currentImageKey) {
           message.textContent =
@@ -84,11 +95,9 @@
         return;
       }
 
-      // Preload the new image to prevent flickering.
       const nextImage = new Image();
 
       nextImage.onload = function() {
-        // Ignore an outdated request.
         if (requestId !== requestNumber) {
           return;
         }
@@ -96,6 +105,7 @@
         picture.src = nextImage.src;
         picture.style.display = "block";
         message.style.display = "none";
+
         currentImageKey = imageKey;
       };
 
@@ -108,18 +118,42 @@
       nextImage.src = result.image;
     }
 
-    // Request the latest image from Google Apps Script.
-    function updatePicture() {
+    // ======================================
+    // REQUEST CONTROL
+    // ======================================
+
+    function updatePicture(force = false) {
+      // Never allow overlapping requests.
+      if (requestInProgress) {
+        if (force) {
+          pendingTransition = true;
+        }
+        return;
+      }
+
+      const now = Date.now();
+
+      // Prevent unnecessary requests.
+      if (!force && now - lastRequestTime < WAKE_COOLDOWN) {
+        return;
+      }
+
+      requestInProgress = true;
+      lastRequestTime = now;
+
       const requestId = ++requestNumber;
       const callbackName = "churchCallback_" + requestId;
 
       const script = document.createElement("script");
+
       let finished = false;
       let timeoutId;
 
       function cleanup() {
         if (finished) return;
+
         finished = true;
+        requestInProgress = false;
 
         clearTimeout(timeoutId);
         script.remove();
@@ -129,17 +163,23 @@
         } catch (e) {
           window[callbackName] = undefined;
         }
+
+        // Process a 7 PM transition that occurred
+        // while the previous request was running.
+        if (pendingTransition) {
+          pendingTransition = false;
+          updatePicture(true);
+        }
       }
 
       window[callbackName] = function(result) {
         if (requestId === requestNumber) {
           displayImage(result, requestId);
         }
+
         cleanup();
       };
 
-      // Send the current image key so Apps Script can
-      // avoid sending an unchanged image again.
       script.src = SCRIPT_URL
         + "?format=js"
         + "&view=" + encodeURIComponent(mode)
@@ -148,23 +188,28 @@
         + "&t=" + Date.now();
 
       script.onerror = function() {
-        if (!currentImageKey && requestId === requestNumber) {
+        if (!currentImageKey) {
           message.textContent = "Connection error";
         }
+
         cleanup();
       };
 
       timeoutId = setTimeout(function() {
-        if (!currentImageKey && requestId === requestNumber) {
+        if (!currentImageKey) {
           message.textContent = "Connection timeout";
         }
+
         cleanup();
-      }, 60000);
+      }, REQUEST_TIMEOUT);
 
       document.body.appendChild(script);
     }
 
-    // Read the current Toronto date and time.
+    // ======================================
+    // TORONTO LOCAL TIME
+    // ======================================
+
     function getTorontoTime() {
       const parts = new Intl.DateTimeFormat("en-CA", {
         timeZone: TIMEZONE,
@@ -190,49 +235,85 @@
       };
     }
 
-    // Detect the daily saint change at 7 PM.
+    // ======================================
+    // DAILY CHANGE AT 7 PM
+    // ======================================
+
     function checkDailyTransition() {
       if (mode !== "daily") return;
 
       const now = getTorontoTime();
 
-      if (now.hour === 19 && now.minute === 0) {
-        if (lastDailyTransition !== now.date) {
-          lastDailyTransition = now.date;
-          updatePicture();
-        }
+      if (
+        now.hour === 19 &&
+        now.minute === 0 &&
+        lastDailyTransition !== now.date
+      ) {
+        lastDailyTransition = now.date;
+
+        // The 7 PM change bypasses the cooldown.
+        updatePicture(true);
       }
     }
 
-    // Load the first image.
+    // ======================================
+    // INITIAL IMAGE
+    // ======================================
+
     updatePicture();
 
-    // Check for image changes every 10 minutes.
-    setInterval(updatePicture, 10 * 60 * 1000);
+    // ======================================
+    // AUTOMATIC REFRESH EVERY 10 MINUTES
+    // ======================================
 
-    // Check the clock every second.
-    setInterval(checkDailyTransition, 1000);
+    setInterval(function() {
+      updatePicture();
+    }, REFRESH_INTERVAL);
 
-    // Refresh when the browser wakes up.
+    // ======================================
+    // CHECK CLOCK EVERY SECOND
+    // ======================================
+
+    setInterval(function() {
+      checkDailyTransition();
+    }, 1000);
+
+    // ======================================
+    // BROWSER WAKE / FOCUS PROTECTION
+    // ======================================
+
+    function refreshAfterWake() {
+      // Only refresh when enough time has passed.
+      // Avoid repeated focus-triggered requests.
+      if (Date.now() - lastRequestTime >= REFRESH_INTERVAL) {
+        updatePicture();
+      }
+
+      checkDailyTransition();
+    }
+
     document.addEventListener("visibilitychange", function() {
       if (!document.hidden) {
-        updatePicture();
-        checkDailyTransition();
+        refreshAfterWake();
       }
     });
 
-    // Refresh when the browser regains focus.
     window.addEventListener("focus", function() {
-      updatePicture();
-      checkDailyTransition();
+      refreshAfterWake();
     });
 
-    // Prevent the image context menu.
+    // ======================================
+    // PREVENT CONTEXT MENU
+    // ======================================
+
     document.addEventListener("contextmenu", function(e) {
       e.preventDefault();
     });
 
-    // Prevent common browser zoom shortcuts.
+    // ======================================
+    // PREVENT BROWSER ZOOM SHORTCUTS
+    // ======================================
+
     document.addEventListener("keydown", function(e) {
       if (
         (e.ctrlKey || e.metaKey) &&
@@ -241,6 +322,7 @@
         e.preventDefault();
       }
     });
+
   </script>
 </body>
 </html>
