@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -50,9 +49,8 @@
 
     const TIMEZONE = "America/Toronto";
 
-    const REFRESH_INTERVAL = 10 * 60 * 1000;
-    const REQUEST_TIMEOUT = 60 * 1000;
-    const WAKE_COOLDOWN = 60 * 1000;
+    // Minimum time between event-driven refreshes (focus / wake).
+    const MIN_GAP_MS = 30 * 1000;
 
     const params = new URLSearchParams(location.search);
 
@@ -64,23 +62,22 @@
     const message = document.getElementById("message");
 
     let currentImageKey = "";
-
     let requestNumber = 0;
-    let requestInProgress = false;
-    let pendingTransition = false;
-
-    let lastRequestTime = 0;
     let lastDailyTransition = "";
 
-    // ======================================
-    // DISPLAY IMAGE WITHOUT FLICKERING
-    // ======================================
+    // Request control: only one request at a time.
+    let inFlight = false;
+    let pendingForce = false;
+    let lastRequestAt = 0;
 
-    function displayImage(result, requestId) {
+    // Display a new image only after it has loaded.
+    function displayImage(result) {
+      // The image has not changed.
       if (result && result.unchanged === true) {
         return;
       }
 
+      // Missing image or server error.
       if (!result || !result.image) {
         if (!currentImageKey) {
           message.textContent =
@@ -95,22 +92,18 @@
         return;
       }
 
+      // Preload the new image to prevent flickering.
       const nextImage = new Image();
 
       nextImage.onload = function() {
-        if (requestId !== requestNumber) {
-          return;
-        }
-
         picture.src = nextImage.src;
         picture.style.display = "block";
         message.style.display = "none";
-
         currentImageKey = imageKey;
       };
 
       nextImage.onerror = function() {
-        if (!currentImageKey && requestId === requestNumber) {
+        if (!currentImageKey) {
           message.textContent = "Unable to load picture";
         }
       };
@@ -118,42 +111,37 @@
       nextImage.src = result.image;
     }
 
-    // ======================================
-    // REQUEST CONTROL
-    // ======================================
-
-    function updatePicture(force = false) {
-      // Never allow overlapping requests.
-      if (requestInProgress) {
-        if (force) {
-          pendingTransition = true;
-        }
-        return;
-      }
-
+    // Request the latest image from Google Apps Script.
+    // force = true bypasses the throttle (timers, 7 PM change).
+    // Without force, calls from focus/wake events are throttled.
+    function updatePicture(force) {
       const now = Date.now();
 
-      // Prevent unnecessary requests.
-      if (!force && now - lastRequestTime < WAKE_COOLDOWN) {
+      // One request at a time. A forced request waits its turn.
+      if (inFlight) {
+        if (force) pendingForce = true;
         return;
       }
 
-      requestInProgress = true;
-      lastRequestTime = now;
+      // Throttle event-driven refreshes.
+      if (!force && now - lastRequestAt < MIN_GAP_MS) {
+        return;
+      }
+
+      inFlight = true;
+      lastRequestAt = now;
 
       const requestId = ++requestNumber;
       const callbackName = "churchCallback_" + requestId;
 
       const script = document.createElement("script");
-
       let finished = false;
       let timeoutId;
 
       function cleanup() {
         if (finished) return;
-
         finished = true;
-        requestInProgress = false;
+        inFlight = false;
 
         clearTimeout(timeoutId);
         script.remove();
@@ -164,22 +152,20 @@
           window[callbackName] = undefined;
         }
 
-        // Process a 7 PM transition that occurred
-        // while the previous request was running.
-        if (pendingTransition) {
-          pendingTransition = false;
+        // Run a forced request that arrived while this one was busy.
+        if (pendingForce) {
+          pendingForce = false;
           updatePicture(true);
         }
       }
 
       window[callbackName] = function(result) {
-        if (requestId === requestNumber) {
-          displayImage(result, requestId);
-        }
-
+        displayImage(result);
         cleanup();
       };
 
+      // Send the current image key so Apps Script can
+      // avoid sending an unchanged image again.
       script.src = SCRIPT_URL
         + "?format=js"
         + "&view=" + encodeURIComponent(mode)
@@ -191,7 +177,6 @@
         if (!currentImageKey) {
           message.textContent = "Connection error";
         }
-
         cleanup();
       };
 
@@ -199,17 +184,13 @@
         if (!currentImageKey) {
           message.textContent = "Connection timeout";
         }
-
         cleanup();
-      }, REQUEST_TIMEOUT);
+      }, 60000);
 
       document.body.appendChild(script);
     }
 
-    // ======================================
-    // TORONTO LOCAL TIME
-    // ======================================
-
+    // Read the current Toronto date and time.
     function getTorontoTime() {
       const parts = new Intl.DateTimeFormat("en-CA", {
         timeZone: TIMEZONE,
@@ -235,85 +216,49 @@
       };
     }
 
-    // ======================================
-    // DAILY CHANGE AT 7 PM
-    // ======================================
-
+    // Detect the daily saint change at 7 PM.
     function checkDailyTransition() {
       if (mode !== "daily") return;
 
       const now = getTorontoTime();
 
-      if (
-        now.hour === 19 &&
-        now.minute === 0 &&
-        lastDailyTransition !== now.date
-      ) {
-        lastDailyTransition = now.date;
-
-        // The 7 PM change bypasses the cooldown.
-        updatePicture(true);
+      if (now.hour === 19 && now.minute === 0) {
+        if (lastDailyTransition !== now.date) {
+          lastDailyTransition = now.date;
+          updatePicture(true);
+        }
       }
     }
 
-    // ======================================
-    // INITIAL IMAGE
-    // ======================================
+    // Load the first image.
+    updatePicture(true);
 
-    updatePicture();
+    // Check for image changes every 10 minutes.
+    setInterval(function() { updatePicture(true); }, 10 * 60 * 1000);
 
-    // ======================================
-    // AUTOMATIC REFRESH EVERY 10 MINUTES
-    // ======================================
+    // Check the clock every second.
+    setInterval(checkDailyTransition, 1000);
 
-    setInterval(function() {
-      updatePicture();
-    }, REFRESH_INTERVAL);
-
-    // ======================================
-    // CHECK CLOCK EVERY SECOND
-    // ======================================
-
-    setInterval(function() {
-      checkDailyTransition();
-    }, 1000);
-
-    // ======================================
-    // BROWSER WAKE / FOCUS PROTECTION
-    // ======================================
-
-    function refreshAfterWake() {
-      // Only refresh when enough time has passed.
-      // Avoid repeated focus-triggered requests.
-      if (Date.now() - lastRequestTime >= REFRESH_INTERVAL) {
-        updatePicture();
-      }
-
-      checkDailyTransition();
-    }
-
+    // Refresh when the browser wakes up (throttled).
     document.addEventListener("visibilitychange", function() {
       if (!document.hidden) {
-        refreshAfterWake();
+        updatePicture();
+        checkDailyTransition();
       }
     });
 
+    // Refresh when the browser regains focus (throttled).
     window.addEventListener("focus", function() {
-      refreshAfterWake();
+      updatePicture();
+      checkDailyTransition();
     });
 
-    // ======================================
-    // PREVENT CONTEXT MENU
-    // ======================================
-
+    // Prevent the image context menu.
     document.addEventListener("contextmenu", function(e) {
       e.preventDefault();
     });
 
-    // ======================================
-    // PREVENT BROWSER ZOOM SHORTCUTS
-    // ======================================
-
+    // Prevent common browser zoom shortcuts.
     document.addEventListener("keydown", function(e) {
       if (
         (e.ctrlKey || e.metaKey) &&
@@ -322,7 +267,6 @@
         e.preventDefault();
       }
     });
-
   </script>
 </body>
 </html>
